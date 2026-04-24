@@ -1,0 +1,27 @@
+# Ambiente virtual Python
+venv/
+env/
+.venv/
+
+# Cache do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs gerados em execução
+bing_log.txt
+*.log
+
+# Arquivo XML temporário do ADB
+view.xml
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+
+# Variáveis de ambiente / chaves sensíveis
+.env
+*.env
+secrets.py
