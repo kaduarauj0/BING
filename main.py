@@ -54,27 +54,89 @@ async def handle_new_pages(context, default_pages_count):
 
 async def get_remaining_searches(page):
     print("[Debug] Navegando para rewards.bing.com...")
-    await page.goto("https://rewards.bing.com/?form=dash_2", wait_until="domcontentloaded", timeout=15000)
+    await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
     await human_delay(3000, 5000)
+
+    # --- Passo 1: Tentar clicar na aba "Status" (novo layout) ---
     try:
-        print("[Debug] Procurando link de detalhamento...")
-        breakdown_link = page.locator('a.pointbreakdownlink')
-        if await breakdown_link.count() > 0:
-            print("[Debug] Clicando no link de detalhamento...")
-            await breakdown_link.first.click(timeout=5000)
-            await human_delay(3000, 5000)
+        print("[Debug] Procurando aba 'Status'...")
+        # Tenta pelos seletores mais comuns de aba no novo layout
+        status_tab_selectors = [
+            "button:has-text('Status')",
+            "a:has-text('Status')",
+            "li:has-text('Status')",
+            "[role='tab']:has-text('Status')",
+            "[aria-label*='Status']",
+        ]
+        for sel in status_tab_selectors:
+            try:
+                tab = page.locator(sel).first
+                if await tab.count() > 0:
+                    print(f"[Debug] Aba 'Status' encontrada ({sel}). Clicando...")
+                    await tab.click(timeout=4000)
+                    await human_delay(2000, 3500)
+                    break
+            except: continue
     except: pass
 
+    # --- Passo 2: Tentar clicar no link "Ver detalhamento dos pontos" ---
     try:
-        body_text = await page.inner_text("body", timeout=5000)
-        pc_match = re.search(r'(\d+)\s*/\s*90', body_text)
-        mob_match = re.search(r'(\d+)\s*/\s*60', body_text)
-        pc_pts = int(pc_match.group(1)) if pc_match else 0
+        print("[Debug] Procurando link de detalhamento...")
+        breakdown_selectors = [
+            'a.pointbreakdownlink',                          # layout antigo
+            'a[href*="breakdown"]',
+            'a[href*="pointsbreakdown"]',
+            "a:has-text('detalhamento')",
+            "a:has-text('Detalhamento')",
+            "button:has-text('detalhamento')",
+            "a:has-text('Ver detalhamento')",
+        ]
+        clicked = False
+        for sel in breakdown_selectors:
+            try:
+                link = page.locator(sel).first
+                if await link.count() > 0:
+                    print(f"[Debug] Link detalhamento encontrado ({sel}). Clicando...")
+                    await link.click(timeout=5000)
+                    await human_delay(3000, 5000)
+                    clicked = True
+                    break
+            except: continue
+
+        # Fallback: busca por texto parcial via get_by_text
+        if not clicked:
+            try:
+                link_txt = page.get_by_text(re.compile(r'detalhamento|breakdown', re.IGNORECASE))
+                if await link_txt.count() > 0:
+                    print("[Debug] Link detalhamento encontrado por texto. Clicando...")
+                    await link_txt.first.click(timeout=5000)
+                    await human_delay(3000, 5000)
+            except: pass
+    except: pass
+
+    # --- Passo 3: Ler pontos do corpo da página ---
+    pc_pts, mob_pts = 0, 0
+    try:
+        body_text = await page.inner_text("body", timeout=8000)
+
+        # Padrões: "X / 90", "X/90", etc.
+        pc_match  = re.search(r'(\d+)\s*/\s*90',  body_text)
+        mob_match = re.search(r'(\d+)\s*/\s*60',  body_text)
+
+        pc_pts  = int(pc_match.group(1))  if pc_match  else 0
         mob_pts = int(mob_match.group(1)) if mob_match else 0
+
+        # Se ainda não achou, tenta via inner_html (valores às vezes ficam em atributos)
+        if pc_pts == 0 and mob_pts == 0:
+            html_text = await page.content()
+            pc_match2  = re.search(r'(\d+)\s*/\s*90',  html_text)
+            mob_match2 = re.search(r'(\d+)\s*/\s*60',  html_text)
+            pc_pts  = int(pc_match2.group(1))  if pc_match2  else 0
+            mob_pts = int(mob_match2.group(1)) if mob_match2 else 0
     except:
         pc_pts, mob_pts = 0, 0
 
-    pc_needed = max(0, (90 - pc_pts) // 3)
+    pc_needed  = max(0, (90 - pc_pts)  // 3)
     mob_needed = max(0, (60 - mob_pts) // 3)
     print(f"[Debug] Pts PC: {pc_pts}/90 (Faltam {pc_needed}), Pts Mob: {mob_pts}/60 (Faltam {mob_needed})")
 
@@ -163,7 +225,7 @@ async def do_daily_sets(context, default_pages_count):
 # ==========================================
 
 ADB_PATH = r"C:\adb\adb.exe"
-DEVICE_ID = "192.168.100.3:37869"
+DEVICE_ID = "RX8T30BGTPW"
 LEITURA_META_PONTOS = 45
 PONTOS_POR_NOTICIA = 3
 
@@ -221,20 +283,44 @@ def is_bing_open():
     return "com.microsoft.bing" in run_adb("shell dumpsys window windows")
 
 def kill_emulator():
-    print("[*] Limpando processos do ADB...")
+    print("[*] Limpando processos...")
+    run_adb("shell svc power stayon false")
+    os.system("taskkill /F /IM scrcpy.exe /T 2>NUL")
     os.system("taskkill /F /IM adb.exe /T 2>NUL")
     time.sleep(3)
 
 def ensure_emulator_running():
-    print("[*] Conectando ao dispositivo físico via Wi-Fi...")
+    print(f"[*] Verificando conexão com dispositivo físico ({DEVICE_ID})...")
     
     subprocess.run([ADB_PATH, "start-server"], capture_output=True, timeout=15)
-    run_adb(f"connect {DEVICE_ID}", timeout_sec=10)
     
+    if "." in DEVICE_ID:
+        print("[*] Conectando via Wi-Fi...")
+        run_adb(f"connect {DEVICE_ID}", timeout_sec=10)
+    else:
+        print("[*] Conexão via Cabo USB selecionada.")
+        
     devices = run_adb("devices", timeout_sec=5)
+    
+    if DEVICE_ID in devices and "unauthorized" in devices:
+        print(f"\n[ERRO CRITICO] O dispositivo {DEVICE_ID} está NAO AUTORIZADO!")
+        print("[ACAO NECESSARIA] Olhe para a tela do seu celular e aceite a permissao de Depuracao USB ('Permitir a partir deste computador').")
+        return False
+        
     if ("device" in devices and DEVICE_ID in devices) or ("192" in devices and "device" in devices):
         print(f"[OK] Dispositivo físico conectado com sucesso! ({DEVICE_ID})")
-        # Mantém a tela ligada / economiza bateria
+        
+        # Inicia o Scrcpy para manter a tela física apagada durante a automação
+        print("[*] Iniciando Scrcpy (Tela Física Apagada)...")
+        scrcpy_path = r"C:\Users\super\Documents\Projetos\scrcpy-win64-v3.1\scrcpy.exe"
+        try:
+            # --power-off-on-close garante que quando o scrcpy fechar, a tela ficará desligada/bloqueada
+            subprocess.Popen([scrcpy_path, "--turn-screen-off", "--power-off-on-close"])
+            time.sleep(3)
+        except Exception as e:
+            print(f"[Aviso] Nao foi possivel iniciar o Scrcpy: {e}")
+
+        # Mantém a tela ligada no sistema / economiza bateria
         run_adb("shell svc power stayon true | usb")
         run_adb("shell input keyevent 224") # WAKEUP
         time.sleep(1)
