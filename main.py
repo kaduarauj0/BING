@@ -151,13 +151,25 @@ async def perform_searches(context, count, device_name="PC"):
         term = term_raw.encode('ascii', 'ignore').decode('ascii')
         print(f"[{device_name}] Pesquisa {i+1}/{count}: '{term}'")
         try:
-            await page.goto("https://www.bing.com/", wait_until="domcontentloaded", timeout=15000)
-            await human_delay(2000, 4000)
-            search_box = page.locator('input[name="q"], textarea[name="q"]').first
-            await search_box.fill("")
-            await search_box.type(term, delay=random.randint(50, 150))
-            await search_box.press("Enter")
-            await human_delay(8000, 12000)
+            # Pula a tela inicial do Bing e navega diretamente para a URL de pesquisa, 
+            # imitando exatamente o comportamento de digitar na barra de endereços do Edge.
+            import urllib.parse
+            # form=CHROMN é um dos códigos que o Edge usa ao pesquisar pela barra de endereços
+            search_url = f"https://www.bing.com/search?q={urllib.parse.quote(term)}&form=CHROMN"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+            
+            # Aguarda a página renderizar bem para o scroll funcionar
+            await human_delay(1500, 3000)
+            
+            # Scroll mais natural para simular leitura
+            try:
+                await page.evaluate(f"window.scrollBy(0, {random.randint(300, 700)})")
+                await human_delay(1000, 2000)
+                await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
+            except:
+                pass
+                
+            await human_delay(7000, 10000)
         except Exception as e: 
             print(f"Erro pesquisa: {e}")
 
