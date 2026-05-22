@@ -43,194 +43,516 @@ async def human_delay(min_ms=2000, max_ms=5000):
     await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000.0)
 
 async def handle_new_pages(context, default_pages_count):
-    await human_delay(3000, 6000)
+    # Aguarda até 8 segundos para ver se uma nova página/aba se abre
+    for _ in range(8):
+        if len(context.pages) > default_pages_count:
+            break
+        await asyncio.sleep(1)
+        
     if len(context.pages) > default_pages_count:
         new_page = context.pages[-1]
+        print(f"[Debug] Nova aba detectada: {new_page.url[:50]}. Interagindo...")
         try:
-            await new_page.evaluate("window.scrollBy(0, window.innerHeight / 2)")
-            await human_delay(1500, 3000)
+            # Espera carregar um pouco
+            await new_page.wait_for_load_state("domcontentloaded", timeout=5000)
         except: pass
-        await new_page.close()
+        try:
+            # Simula scroll
+            await new_page.evaluate("window.scrollBy(0, window.innerHeight / 2)")
+            await human_delay(2000, 4000)
+            await new_page.evaluate("window.scrollBy(0, -window.innerHeight / 4)")
+            await human_delay(1000, 2000)
+        except: pass
+        try:
+            await new_page.close()
+            print("[Debug] Nova aba fechada.")
+        except: pass
 
-async def get_remaining_searches(page):
-    print("[Debug] Navegando para rewards.bing.com...")
-    await page.goto("https://rewards.bing.com/", wait_until="domcontentloaded", timeout=15000)
-    await human_delay(3000, 5000)
-
-    # --- Passo 1: Tentar clicar na aba "Status" (novo layout) ---
+async def claim_points_if_available(page):
+    print("[Debug] Verificando pontos para reivindicar...")
+    pts = 0
     try:
-        print("[Debug] Procurando aba 'Status'...")
-        # Tenta pelos seletores mais comuns de aba no novo layout
-        status_tab_selectors = [
-            "button:has-text('Status')",
-            "a:has-text('Status')",
-            "li:has-text('Status')",
-            "[role='tab']:has-text('Status')",
-            "[aria-label*='Status']",
-        ]
-        for sel in status_tab_selectors:
-            try:
-                tab = page.locator(sel).first
-                if await tab.count() > 0:
-                    print(f"[Debug] Aba 'Status' encontrada ({sel}). Clicando...")
-                    await tab.click(timeout=4000)
-                    await human_delay(2000, 3500)
-                    break
-            except: continue
-    except: pass
-
-    # --- Passo 2: Tentar clicar no link "Ver detalhamento dos pontos" ---
+        card = page.locator("button").filter(has_text="Pronto para reivindicar").last
+        if await card.count() > 0:
+            text = await card.text_content()
+            text_clean = " ".join(text.split())
+            print(f"[Debug] Texto do card de reivindicar: '{text_clean}'")
+            match = re.search(r'Pronto para reivindicar\s*(?:\|\s*)?(\d+)', text_clean, re.IGNORECASE)
+            if match:
+                pts = int(match.group(1))
+                print(f"[Debug] Encontrado via card específico: {pts} pontos.")
+            else:
+                digits = re.findall(r'\d+', text_clean)
+                if digits:
+                    pts = int(digits[0])
+        else:
+            # Fallback para busca textual geral
+            body_text = await page.inner_text("body", timeout=5000)
+            match = re.search(r'Pronto para reivindicar\s*(?:\|\s*)?(\d+)', body_text, re.IGNORECASE)
+            if match:
+                pts = int(match.group(1))
+    except Exception as e:
+        print(f"[Erro] Falha ao verificar pontos para reivindicar: {e}")
+        
+    if pts == 0:
+        print("[Debug] Não há pontos para reivindicar hoje (pontos = 0 ou não encontrados).")
+        return "não há pontos para reivindicar hoje", 0
+        
+    print(f"[Debug] Reivindicando {pts} pontos...")
     try:
-        print("[Debug] Procurando link de detalhamento...")
-        breakdown_selectors = [
-            'a.pointbreakdownlink',                          # layout antigo
-            'a[href*="breakdown"]',
-            'a[href*="pointsbreakdown"]',
-            "a:has-text('detalhamento')",
-            "a:has-text('Detalhamento')",
-            "button:has-text('detalhamento')",
-            "a:has-text('Ver detalhamento')",
-        ]
         clicked = False
-        for sel in breakdown_selectors:
-            try:
-                link = page.locator(sel).first
-                if await link.count() > 0:
-                    print(f"[Debug] Link detalhamento encontrado ({sel}). Clicando...")
-                    await link.click(timeout=5000)
-                    await human_delay(3000, 5000)
+        card = page.locator("button").filter(has_text="Pronto para reivindicar").first
+        if await card.count() > 0:
+            print("[Debug] Clicando no card de reivindicar...")
+            await card.click(timeout=5000)
+            clicked = True
+        else:
+            reclaim_button_selectors = [
+                "button:has-text('Reivindicar')",
+                "a:has-text('Reivindicar')",
+                "button:has-text('reivindicar')",
+                "a:has-text('reivindicar')",
+            ]
+            for selector in reclaim_button_selectors:
+                loc = page.locator(selector)
+                if await loc.count() > 0:
+                    print(f"[Debug] Clicando no botão de reivindicação fallback ({selector})...")
+                    await loc.first.click(timeout=5000)
                     clicked = True
                     break
-            except: continue
-
-        # Fallback: busca por texto parcial via get_by_text
+                    
         if not clicked:
-            try:
-                link_txt = page.get_by_text(re.compile(r'detalhamento|breakdown', re.IGNORECASE))
-                if await link_txt.count() > 0:
-                    print("[Debug] Link detalhamento encontrado por texto. Clicando...")
-                    await link_txt.first.click(timeout=5000)
-                    await human_delay(3000, 5000)
-            except: pass
-    except: pass
+            print("[Erro] Botão de reivindicação não localizado.")
+            return "falha ao reivindicar pontos", 0
 
-    # --- Passo 3: Ler pontos do corpo da página ---
-    pc_pts, mob_pts = 0, 0
+        await human_delay(3000, 5000)
+        
+        panel_button_selectors = [
+            "button:has-text('reivindicar pontos')",
+            "a:has-text('reivindicar pontos')",
+            "button:has-text('Reivindicar pontos')",
+            "a:has-text('Reivindicar pontos')",
+            "button:has-text('reivindicar')",
+            "a:has-text('reivindicar')",
+            "[aria-label*='reivindicar pontos']",
+            "[aria-label*='Reivindicar pontos']"
+        ]
+        
+        clicked_panel = False
+        for selector in panel_button_selectors:
+            loc = page.locator(selector)
+            for idx in range(await loc.count()):
+                el = loc.nth(idx)
+                if await el.is_visible():
+                    try:
+                        await el.scroll_into_view_if_needed()
+                    except: pass
+                    print(f"[Debug] Clicando no botão do painel lateral ({selector})...")
+                    await el.click(timeout=5000)
+                    clicked_panel = True
+                    break
+            if clicked_panel:
+                break
+                
+        if not clicked_panel:
+            loc = page.get_by_text("reivindicar pontos", exact=False)
+            if await loc.count() > 0:
+                await loc.first.scroll_into_view_if_needed()
+                await loc.first.click(timeout=5000)
+                clicked_panel = True
+                
+        if clicked_panel:
+            await human_delay(3000, 5000)
+            print(f"[SUCESSO] Pontos reivindicados com sucesso: {pts} pontos.")
+            return f"reivindicados (+{pts} pts)", pts
+        else:
+            print("[Erro] Botão final 'reivindicar pontos' não localizado no painel lateral.")
+            return "falha ao reivindicar pontos", 0
+            
+    except Exception as e:
+        print(f"[Erro] Falha no fluxo de reivindicar pontos: {e}")
+        return "falha ao reivindicar pontos", 0
+
+async def get_daily_set_cards(page):
+    print("[Debug] Procurando seção 'definido diariamente'...")
+    daily_set_titles = ["Definido diariamente", "Daily set", "Daily Set", "definido diariamente"]
+    
+    xpath_daily = " | ".join([f"//div[contains(@class, 'react-aria-Disclosure')][descendant::*[contains(text(), '{t}')]]" for t in daily_set_titles])
+    disclosure = page.locator(xpath_daily)
+    
+    cards_found = []
+    if await disclosure.count() > 0:
+        panel = disclosure.locator("div.react-aria-DisclosurePanel")
+        all_elements = await panel.locator("a, button, [role='button']").all()
+        for el in all_elements:
+            text = await el.text_content()
+            text_clean = " ".join(text.split())
+            if len(text_clean) > 15:
+                cards_found.append(el)
+    
+    if not cards_found:
+        print("[Debug] Busca estruturada não localizou os cards. Usando busca de fallback...")
+        try:
+            candidates = await page.locator("a, button, [role='button'], div.card, div.cursor-pointer, div[class*='cursor-pointer']").all()
+            for cand in candidates:
+                if await cand.is_visible():
+                    text = await cand.text_content()
+                    if text and any(x in text for x in ["Concluído", "Concluido", "10", "30", "50"]):
+                        cards_found.append(cand)
+        except Exception as e:
+            print(f"[Debug] Erro no fallback global: {e}")
+
+    unique_cards = []
+    seen_boxes = []
+    for card in cards_found:
+        try:
+            text = await card.text_content()
+            if not text:
+                continue
+            box = await card.bounding_box()
+            if box:
+                cx, cy = box['x'] + box['width']/2, box['y'] + box['height']/2
+                if box['width'] == 0 or box['height'] == 0: continue
+                duplicated = False
+                for sx, sy in seen_boxes:
+                    if abs(cx - sx) < 15 and abs(cy - sy) < 15:
+                        duplicated = True
+                        break
+                if not duplicated:
+                    unique_cards.append(card)
+                    seen_boxes.append((cx, cy))
+        except: pass
+            
+    print(f"[Debug] Encontrados {len(unique_cards)} cards únicos para o conjunto diário.")
+    return unique_cards
+
+async def is_card_completed(card):
     try:
-        body_text = await page.inner_text("body", timeout=8000)
-
-        # Padrões: "X / 90", "X/90", etc.
-        pc_match  = re.search(r'(\d+)\s*/\s*90',  body_text)
-        mob_match = re.search(r'(\d+)\s*/\s*60',  body_text)
-
-        pc_pts  = int(pc_match.group(1))  if pc_match  else 0
-        mob_pts = int(mob_match.group(1)) if mob_match else 0
-
-        # Se ainda não achou, tenta via inner_html (valores às vezes ficam em atributos)
-        if pc_pts == 0 and mob_pts == 0:
-            html_text = await page.content()
-            pc_match2  = re.search(r'(\d+)\s*/\s*90',  html_text)
-            mob_match2 = re.search(r'(\d+)\s*/\s*60',  html_text)
-            pc_pts  = int(pc_match2.group(1))  if pc_match2  else 0
-            mob_pts = int(mob_match2.group(1)) if mob_match2 else 0
+        text = await card.text_content()
+        # 1. Se o texto contiver palavras de conclusão
+        if any(indicator in text.lower() for indicator in ["concluído", "concluido", "completed", "checked"]):
+            return True
+            
+        # 2. Se o HTML contiver indicadores de conclusão
+        html = await card.evaluate("el => el.outerHTML")
+        if any(indicator in html.lower() for indicator in ["icon-check", "skypecirclecheck", "completed", "concluido", "concluído", "checked"]):
+            return True
+        if "check" in html.lower() and "svg" in html.lower():
+            return True
+            
+        return False
     except:
-        pc_pts, mob_pts = 0, 0
+        return False
 
-    pc_needed  = max(0, (90 - pc_pts)  // 3)
-    mob_needed = max(0, (60 - mob_pts) // 3)
-    print(f"[Debug] Pts PC: {pc_pts}/90 (Faltam {pc_needed}), Pts Mob: {mob_pts}/60 (Faltam {mob_needed})")
+async def run_daily_sets_workflow(context, default_pages_count):
+    print("\n--- INICIANDO ETAPA 2: CONJUNTO DIÁRIO ---")
+    page = context.pages[0] if context.pages else await context.new_page()
+    url = "https://rewards.bing.com/dashboard"
+    
+    for attempt in range(3):
+        print(f"[Daily Set] Tentativa {attempt+1}/3 de conclusão...")
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await human_delay(3000, 5000)
+        except Exception as e:
+            print(f"[Daily Set] Erro ao navegar para dashboard: {e}")
+            continue
+            
+        try:
+            close_btn = page.locator("button.ms-Dialog-button--close, button[aria-label='Fechar'], button#modal-host-close, button#bnp_btn_accept")
+            if await close_btn.count() > 0:
+                await close_btn.first.click(timeout=3000)
+                await human_delay(1000, 2000)
+        except: pass
 
-    return pc_pts, mob_pts, pc_needed, mob_needed
+        cards = await get_daily_set_cards(page)
+        if not cards:
+            print("[Daily Set] Nenhum card do conjunto diário foi localizado.")
+            continue
+            
+        pending_cards = []
+        for card in cards:
+            if not await is_card_completed(card):
+                pending_cards.append(card)
+                
+        print(f"[Daily Set] Dos {len(cards)} cards localizados, {len(pending_cards)} estão pendentes.")
+        
+        if len(pending_cards) == 0:
+            print("[SUCESSO] Todos os cards do conjunto diário já estão concluídos!")
+            return "Concluído (+30 pts)", 30
+            
+        for idx, card in enumerate(pending_cards):
+            try:
+                txt = await card.inner_text()
+                txt_safe = txt.replace("\n", " ").strip()[:40].encode('ascii', errors='replace').decode('ascii')
+                print(f"[Daily Set] Clicando no card pendente: '{txt_safe}'")
+                await card.click(force=True, timeout=5000)
+                await handle_new_pages(context, default_pages_count)
+                await human_delay(2000, 4000)
+            except Exception as e:
+                print(f"[Daily Set] Erro ao processar card: {e}")
+                
+        await human_delay(3000, 5000)
+        
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await human_delay(3000, 5000)
+        cards = await get_daily_set_cards(page)
+        pending_count = 0
+        for card in cards:
+            if not await is_card_completed(card):
+                pending_count += 1
+        if pending_count == 0 and len(cards) >= 3:
+            return "Concluído (+30 pts)", 30
+    except: pass
+        
+    return "Falhou/Incompleto", 0
 
 async def perform_searches(context, count, device_name="PC"):
     if count <= 0: return
     page = context.pages[0] if context.pages else await context.new_page()
     for i in range(count):
         term_raw = get_random_search_term()
-        # Remove caracteres que o terminal Windows não aguenta imprimir
         term = term_raw.encode('ascii', 'ignore').decode('ascii')
         print(f"[{device_name}] Pesquisa {i+1}/{count}: '{term}'")
         try:
-            # Pula a tela inicial do Bing e navega diretamente para a URL de pesquisa, 
-            # imitando exatamente o comportamento de digitar na barra de endereços do Edge.
             import urllib.parse
-            # form=CHROMN é um dos códigos que o Edge usa ao pesquisar pela barra de endereços
             search_url = f"https://www.bing.com/search?q={urllib.parse.quote(term)}&form=CHROMN"
             await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-            
-            # Aguarda a página renderizar bem para o scroll funcionar
             await human_delay(1500, 3000)
-            
-            # Scroll mais natural para simular leitura
             try:
                 await page.evaluate(f"window.scrollBy(0, {random.randint(300, 700)})")
                 await human_delay(1000, 2000)
                 await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
-            except:
-                pass
-                
+            except: pass
             await human_delay(7000, 10000)
         except Exception as e: 
             print(f"Erro pesquisa: {e}")
 
-async def do_daily_sets(context, default_pages_count):
-    print("\n--- INICIANDO CONJUNTO DIÁRIO (E EXTRAÇÃO DE LIMITES) ---")
+async def check_and_perform_searches(context):
+    print("\n--- INICIANDO ETAPA 3: PESQUISAS (WEB 60 PONTOS) ---")
     page = context.pages[0] if context.pages else await context.new_page()
-    print("[Debug] Acessando painel de Rewards...")
+    url = "https://rewards.bing.com/earn"
+    
+    current_pts = 0
+    max_pts = 60
+    
+    for attempt in range(3):
+        print(f"[Pesquisas] Tentativa {attempt+1}/3 de verificação/pesquisa...")
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await human_delay(3000, 5000)
+        except Exception as e:
+            print(f"[Pesquisas] Erro ao navegar para a página /earn: {e}")
+            continue
+            
+        print("[Pesquisas] Procurando botão de 'Detalhamento de pontos'...")
+        btn = page.locator("button").filter(has_text="Detalhamento de pontos")
+        clicked_today_points = False
+        if await btn.count() > 0:
+            print("[Pesquisas] Clicando no botão...")
+            try:
+                await btn.first.click(timeout=5000)
+                await human_delay(3000, 5000)
+                clicked_today_points = True
+            except Exception as e:
+                print(f"[Pesquisas] Falha ao clicar no botão: {e}")
+        
+        if not clicked_today_points:
+            print("[Pesquisas] Não foi possível clicar no card 'Detalhamento de pontos'. Fazendo 20 pesquisas cegas...")
+            await perform_searches(context, 20, "PC")
+            return "Concluído (Buscas feitas às cegas)", 60
+            
+        print("[Pesquisas] Lendo pontos da barra lateral...")
+        found_pts = False
+        try:
+            row_locator = page.locator("div").filter(has_text="Pesquisa do Bing").filter(has_text="/60")
+            count = await row_locator.count()
+            if count > 0:
+                text = await row_locator.last.text_content()
+                text_clean = " ".join(text.split())
+                print(f"[Pesquisas] Texto do contêiner de pesquisa: '{text_clean}'")
+                match = re.search(r'(\d+)\s*/\s*60', text_clean)
+                if match:
+                    current_pts = int(match.group(1))
+                    found_pts = True
+                    print(f"[Pesquisas] Pontos atuais detectados: {current_pts}/60")
+            
+            if not found_pts:
+                row_locator_fallback = page.locator("div").filter(has_text="Pesquisa do Bing")
+                fb_count = await row_locator_fallback.count()
+                if fb_count > 0:
+                    text = await row_locator_fallback.last.text_content()
+                    text_clean = " ".join(text.split())
+                    print(f"[Pesquisas] Fallback - Texto do contêiner de pesquisa: '{text_clean}'")
+                    match = re.search(r'(\d+)\s*/\s*(\d+)', text_clean)
+                    if match:
+                        current_pts = int(match.group(1))
+                        max_pts = int(match.group(2))
+                        found_pts = True
+                        print(f"[Pesquisas] Pontos atuais (Fallback): {current_pts}/{max_pts}")
+        except Exception as e:
+            print(f"[Pesquisas] Erro ao ler barra lateral: {e}")
+            
+        if not found_pts:
+            print("[Pesquisas] Não foi possível ler a pontuação. Assumindo 0/60 e continuando...")
+            current_pts = 0
+            
+        if current_pts >= max_pts:
+            print(f"[SUCESSO] Pesquisas web concluídas ({current_pts}/{max_pts})!")
+            return f"Concluído ({current_pts}/{max_pts})", current_pts
+            
+        searches_needed = (max_pts - current_pts) // 3
+        if searches_needed <= 0:
+            searches_needed = 20
+            
+        print(f"[Pesquisas] Faltam {max_pts - current_pts} pontos. Iniciando {searches_needed} pesquisas...")
+        await perform_searches(context, searches_needed, "PC")
+        await human_delay(3000, 5000)
+        
     try:
-        await page.goto("https://rewards.bing.com/?form=dash_2", wait_until="domcontentloaded", timeout=15000)
-    except Exception as e:
-        print(f"[Debug] Tempo esgotado no carregamento inicial (ignorado): {e}")
-
-    await human_delay(4000, 6000)
-
-    print("[Debug] Checando e fechando modais de boas-vindas/cookies...")
-    try:
-        if await page.locator("button#bnp_btn_accept").count() > 0:
-            await page.locator("button#bnp_btn_accept").click(timeout=3000)
-            await human_delay(1000, 2000)
-        close_btn = page.locator("button.ms-Dialog-button--close, button[aria-label='Fechar'], button#modal-host-close")
-        if await close_btn.count() > 0:
-            await close_btn.first.click(timeout=3000)
-            await human_delay(1000, 2000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await human_delay(3000, 5000)
+        btn = page.locator("button").filter(has_text="Detalhamento de pontos")
+        if await btn.count() > 0:
+            await btn.first.click(timeout=5000)
+            await human_delay(3000, 5000)
+            row_locator = page.locator("div").filter(has_text="Pesquisa do Bing").filter(has_text="/60")
+            if await row_locator.count() > 0:
+                text = await row_locator.last.text_content()
+                text_clean = " ".join(text.split())
+                match = re.search(r'(\d+)\s*/\s*60', text_clean)
+                if match:
+                    current_pts = int(match.group(1))
+                    if current_pts >= max_pts:
+                        return f"Concluído ({current_pts}/60)", 60
+                    else:
+                        return f"Incompleto ({current_pts}/60)", current_pts
     except: pass
+        
+    return f"Incompleto ({current_pts}/{max_pts})", current_pts
 
-    print("[Debug] Processando Daily Sets...")
-    daily_sets = await page.locator("mee-rewards-daily-set-item-content").all()
-    for i, card in enumerate(daily_sets[:3]):
+async def get_keep_earning_progress(page):
+    print("[Debug] Procurando progresso de 'continuar ganhando'...")
+    earn_titles = ["Continuar ganhando", "Keep earning"]
+    xpath_earn = " | ".join([f"//div[contains(@class, 'react-aria-Disclosure')][descendant::*[contains(text(), '{t}')]]" for t in earn_titles])
+    disclosure = page.locator(xpath_earn)
+    
+    if await disclosure.count() > 0:
+        text = await disclosure.locator("div.rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']").first.text_content()
+        text_clean = " ".join(text.split())
+        match = re.search(r'(\d+)\s*/\s*(\d+)', text_clean)
+        if match:
+            earned = int(match.group(1))
+            total = int(match.group(2))
+            print(f"[Debug] Progresso extra encontrado: {earned}/{total}")
+            return earned, total, disclosure
+    return None, None, None
+
+async def get_keep_earning_cards(container, page):
+    cards_found = []
+    if container:
         try:
-            html = await card.evaluate("el => el.outerHTML")
-            if "icon-check" not in html and "SkypeCircleCheck" not in html:
-                print(f"[Debug] Clicando no Conjunto Diário {i+1}...")
-                await card.click(force=True, timeout=3000)
-                await handle_new_pages(context, default_pages_count)
-            else:
-                print(f"[Debug] Card Diario {i+1} ja concluido.")
+            panel = container.locator("div.react-aria-DisclosurePanel")
+            all_elements = await panel.locator("a, button, [role='button']").all()
+            for el in all_elements:
+                text = await el.text_content()
+                text_clean = " ".join(text.split())
+                if len(text_clean) > 15:
+                    cards_found.append(el)
         except Exception as e:
-            print(f"[Debug] Erro ao processar Card Diario {i+1}: {e}")
-
-    print("[Debug] Buscando Mais Atividades (rolando a tela)...")
-    await page.evaluate("window.scrollBy(0, 800)")
-    await human_delay(2000, 4000)
-
-    more_activities = await page.locator("mee-rewards-more-activities-card-item").all()
-    for i, card in enumerate(more_activities):
+            print(f"[Debug] Erro ao obter cards do Continuar Ganhando: {e}")
+            
+    unique_cards = []
+    seen_boxes = []
+    for card in cards_found:
         try:
-            text = await card.inner_text(timeout=3000)
-            html = await card.evaluate("el => el.outerHTML")
-            if "icon-check" in html or "SkypeCircleCheck" in html:
+            text = await card.text_content()
+            if not text:
                 continue
-            is_point_mission = text.strip().startswith("5\n") or text.strip().startswith("10\n") or "AddClaim" in html
-            if is_point_mission:
-                print(f"[Debug] Missão extra encontrada {i+1}. Clicando...")
-                await card.click(force=True, timeout=3000)
-                await handle_new_pages(context, default_pages_count)
-        except Exception as e:
-            print(f"[Debug] Erro ao processar card extra {i+1}: {e}")
+            box = await card.bounding_box()
+            if box:
+                cx, cy = box['x'] + box['width']/2, box['y'] + box['height']/2
+                if box['width'] == 0 or box['height'] == 0: continue
+                duplicated = False
+                for sx, sy in seen_boxes:
+                    if abs(cx - sx) < 15 and abs(cy - sy) < 15:
+                        duplicated = True
+                        break
+                if not duplicated:
+                    unique_cards.append(card)
+                    seen_boxes.append((cx, cy))
+        except: pass
+        
+    return unique_cards
 
-    print("[Debug] Calculando buscas faltantes...")
-    pc_pts, mob_pts, pc_needed, mob_needed = await get_remaining_searches(page)
-    return pc_pts, mob_pts, pc_needed, mob_needed
+async def do_keep_earning(context, default_pages_count):
+    print("\n--- INICIANDO ETAPA 4: CONTINUAR GANHANDO ---")
+    page = context.pages[0] if context.pages else await context.new_page()
+    url = "https://rewards.bing.com/earn"
+    
+    for attempt in range(3):
+        print(f"[Extras] Tentativa {attempt+1}/3 de conclusão...")
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await human_delay(3000, 5000)
+        except Exception as e:
+            print(f"[Extras] Erro ao navegar para a página earn: {e}")
+            continue
+            
+        earned, total, container = await get_keep_earning_progress(page)
+        if earned is None or total is None:
+            print("[Extras] Não foi possível ler o progresso. Procurando cards de forma genérica...")
+            loc = page.get_by_text("continuar ganhando", exact=False)
+            if await loc.count() > 0:
+                container = loc.first.locator("xpath=..").locator("xpath=..")
+                earned, total = 0, 45
+            else:
+                print("[Extras] Seção não localizada na página.")
+                return "Não localizado", 0
+                
+        if earned >= total:
+            print(f"[SUCESSO] Pontos extras já concluídos! ({earned}/{total})")
+            return f"Concluído ({earned}/{total})", earned
+            
+        cards = await get_keep_earning_cards(container, page)
+        print(f"[Extras] Encontrados {len(cards)} cards extras na seção.")
+        
+        pending_cards = []
+        for card in cards:
+            if not await is_card_completed(card):
+                pending_cards.append(card)
+                
+        print(f"[Extras] Cards pendentes: {len(pending_cards)}")
+        if len(pending_cards) == 0:
+            print(f"[SUCESSO] Todos os cards extras disponíveis já estão concluídos! ({earned}/{total})")
+            return f"Concluído ({earned}/{total})", earned
+            
+        for idx, card in enumerate(pending_cards):
+            try:
+                txt = await card.inner_text()
+                txt_safe = txt.replace("\n", " ").strip()[:40].encode('ascii', errors='replace').decode('ascii')
+                print(f"[Extras] Clicando no card extra pendente {idx+1}/{len(pending_cards)}: '{txt_safe}'")
+                await card.click(force=True, timeout=5000)
+                await handle_new_pages(context, default_pages_count)
+                await human_delay(2000, 4000)
+            except Exception as e:
+                print(f"[Extras] Erro ao processar card: {e}")
+                
+        await human_delay(3000, 5000)
+        
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await human_delay(3000, 5000)
+        earned, total, _ = await get_keep_earning_progress(page)
+        if earned is not None:
+            if earned >= total:
+                return f"Concluído ({earned}/{total})", earned
+            else:
+                return f"Incompleto ({earned}/{total})", earned
+    except: pass
+    
+    return "Falhou/Incompleto", 0
 
 # ==========================================
 # FUNÇÕES ANDROID (ADB - DISPOSITIVO FÍSICO)
@@ -443,7 +765,9 @@ def contar_moedas_nao_coletadas(xml, min_y=500):
         return -1
 
 def return_to_home_top():
-    """Toca no icone 'Home/Início' na barra inferior para voltar ao topo instantaneamente."""
+    """Toca no icone 'Home/Início' na barra inferior para voltar ao topo instantaneamente.
+    Se falhar, faz scroll up 3 vezes para subir o feed com segurança.
+    """
     print("[*] Retornando ao topo via ícone Home...")
     
     # Tentativa 1: Localizar dinamicamente no XML
@@ -471,78 +795,123 @@ def return_to_home_top():
                         return True
         except: pass
     
-    # Tentativa 2: Clique cego na posição padrão do S20 FE caso o XML falhe
-    # Geralmente a barra de navegação inferior fica abaixo de Y=2100.
-    print("[AVISO] Ícone Home não encontrado no XML. Tentando clique forçado na posição (140, 2280)...")
-    tap(140, 2280) 
-    time.sleep(1.2)
-    return True
+    # Tentativa 2: Fallback com scrolls para cima se o XML/Clique falhar
+    print("[AVISO] Ícone Home não encontrado ou clique falhou. Executando scrolls para subir ao topo...")
+    for _ in range(3):
+        scroll_up()
+        time.sleep(0.8)
+    return False
 
-def do_daily_checkin():
-    """Executa o check-in diario.
-    1. Localiza e clica no widget Rewards via XML.
-    2. Aguarda a aba Rewards carregar.
-    3. Tira screenshot e localiza a palavra 'Check-in' por cor para clicar com precisao.
-    """
-    print("[Check-in] Iniciando processo de check-in...")
-    return_to_home_top()
-    time.sleep(3)
-
-    print("[Check-in] Procurando widget do Rewards via XML...")
-    rewards_bounds = None
+def find_rewards_widget_bounds(xml):
+    """Localiza o bounding box do card do Rewards de maneira unificada."""
+    if not xml:
+        return None
     REWARDS_CARD_IDS = [
         'com.microsoft.bing:id/rewards_widget',
         'com.microsoft.bing:id/sa_hp_reward_card',
         'com.microsoft.bing:id/rewards_card',
     ]
+    try:
+        root = ET.fromstring(xml)
+        # Tentativa 1: IDs de widget conhecidos
+        for rid in REWARDS_CARD_IDS:
+            node = root.find(f".//node[@resource-id='{rid}']")
+            if node is not None:
+                bounds = parse_bounds(node.get('bounds', ''))
+                if bounds[2] - bounds[0] > 100:
+                    return bounds
+        
+        # Tentativa 2: Busca por texto contendo a pontuação (ex: "Rewards 210/210")
+        for node in root.iter('node'):
+            t, c = node.get('text', ''), node.get('content-desc', '')
+            if re.search(r'Rewards.*?\d+', t, re.I) or re.search(r'Rewards.*?\d+', c, re.I):
+                bounds = parse_bounds(node.get('bounds', ''))
+                if bounds[2] - bounds[0] > 100:
+                    return bounds
+
+        # Tentativa 3: Busca genérica pela palavra "Rewards" eliminando botões minúsculos
+        for node in root.iter('node'):
+            t, c = node.get('text', ''), node.get('content-desc', '')
+            if 'rewards' in t.lower() or 'rewards' in c.lower():
+                b = parse_bounds(node.get('bounds', ''))
+                # Tem que estar abaixo do topo (Y > 300) e ter largura de card (X > 100)
+                if b[1] > 300 and (b[2] - b[0]) > 100:
+                    return b
+    except Exception as e:
+        print(f"[Debug] Erro ao analisar XML buscando Rewards: {e}")
+    return None
+
+def ensure_bing_home_and_rewards_visible(max_retries=3):
+    """Garante que o app está na home e com o card de Rewards visível.
+    Tenta fechar modais, ir para o topo e reiniciar o Bing se falhar.
+    """
+    for att in range(max_retries):
+        if att > 0:
+            print(f"[Home Check] Widget não detectado. Reiniciando Bing (tentativa {att}/{max_retries - 1})...")
+            force_restart_bing()
+            
+        clear_blocking_modals()
+        return_to_home_top()
+        
+        xml = get_ui_dump(retries=2)
+        bounds = find_rewards_widget_bounds(xml)
+        if bounds:
+            print(f"[Home Check] Widget Rewards detectado com sucesso em {bounds}.")
+            return bounds
+            
+        print("[Home Check] Widget Rewards não foi encontrado.")
+        time.sleep(2)
+        
+    print("[Home Check] FALHA CRÍTICA: Widget do Rewards não foi detectado após as reinicializações.")
+    return None
+
+def do_daily_checkin():
+    """Executa o check-in diario.
+    1. Garante que está na Home e localiza o widget do Rewards.
+    2. Clica no widget.
+    3. Aguarda a aba Rewards carregar.
+    4. Tira screenshot e localiza a palavra 'Check-in' por cor para clicar com precisao.
+    """
+    print("[Check-in] Iniciando processo de check-in...")
     
-    for i in range(3):
-        xml = get_ui_dump(retries=1)
-        if not xml: continue
+    rewards_bounds = ensure_bing_home_and_rewards_visible(max_retries=3)
+    if not rewards_bounds:
+        print("[Check-in] ABORTADO: Não foi possível assegurar a visibilidade do widget do Rewards.")
+        return False
+
+    cx = (rewards_bounds[0] + rewards_bounds[2]) // 2
+    cy = (rewards_bounds[1] + rewards_bounds[3]) // 2
+    print(f"[Check-in] Widget Rewards localizado. Clicando em ({cx}, {cy})...")
+    tap(cx, cy)
+        
+    print("[Check-in] Aguardando ~100 segundos para a WebView do Rewards carregar por completo...")
+    # Damos 10s para o carregamento inicial da webview
+    time.sleep(10)
+
+    # Identificar a posição limite baseada no título "Sequência" para ignorar o "Indique e Ganhe"
+    def find_sequence_title_y():
+        xml = get_ui_dump(retries=2)
+        if not xml:
+            return None
         try:
             root = ET.fromstring(xml)
-            # Tentativa 1: IDs de widget conhecidos
-            for rid in REWARDS_CARD_IDS:
-                node = root.find(f".//node[@resource-id='{rid}']")
-                if node is not None:
-                    rewards_bounds = parse_bounds(node.get('bounds', ''))
-                    break
-            
-            # Tentativa 2: Busca por texto contendo a pontuação (muito seguro, ex: "Rewards 210/210")
-            if not rewards_bounds:
-                for node in root.iter('node'):
-                    t, c = node.get('text', ''), node.get('content-desc', '')
-                    if re.search(r'Rewards.*?\d+', t, re.I) or re.search(r'Rewards.*?\d+', c, re.I):
-                        rewards_bounds = parse_bounds(node.get('bounds', ''))
-                        break
-
-            # Tentativa 3: Busca genérica pela palavra "Rewards" eliminando botões minúsculos
-            if not rewards_bounds:
-                for node in root.iter('node'):
-                    t, c = node.get('text', ''), node.get('content-desc', '')
-                    if 'rewards' in t.lower() or 'rewards' in c.lower():
-                        b = parse_bounds(node.get('bounds', ''))
-                        # Tem que estar abaixo do topo (Y > 300) e ter largura de card (X > 100)
-                        if b[1] > 300 and (b[2] - b[0]) > 100:
-                            rewards_bounds = b
-                            break
+            for node in root.iter('node'):
+                t = (node.get('text') or '').lower()
+                c = (node.get('content-desc') or '').lower()
+                # Procuramos termos em português ou inglês para a área da sequência
+                if 'sequên' in t or 'sequen' in t or 'streak' in t or 'sequên' in c or 'sequen' in c or 'streak' in c:
+                    b = parse_bounds(node.get('bounds', ''))
+                    # Retorna a coordenada Y inferior do título para limite
+                    print(f"[Check-in] Título 'Sequência' detectado em {b}. Limitando busca das moedas a Y > {b[3]}.")
+                    return b[3]
         except Exception as e:
-            print(f"[Check-in] Erro ao analisar XML: {e}")
-            
-        if rewards_bounds: break
-        time.sleep(2)
+            print(f"[Check-in] Erro ao buscar título 'Sequência' no XML: {e}")
+        return None
 
-    if rewards_bounds:
-        cx = (rewards_bounds[0] + rewards_bounds[2]) // 2
-        cy = (rewards_bounds[1] + rewards_bounds[3]) // 2
-        print(f"[Check-in] Widget Rewards localizado via XML. Clicando em ({cx}, {cy})...")
-        tap(cx, cy)
-    else:
-        print("[Check-in] Falha ao achar Widget no XML. Usando coordenada fixa fallback (258, 1844)...")
-        tap(258, 1844)
-        
-    print("[Check-in] Aguardando ~10 segundos para a WebView do Rewards carregar por completo...")
-    time.sleep(10)
+    seq_y = find_sequence_title_y()
+    if seq_y is None:
+        seq_y = 1780  # Fallback seguro caso o XML não carregue/mostre o texto
+        print(f"[Check-in] Título 'Sequência' não localizado no XML. Usando Y > {seq_y} como fallback de segurança.")
 
     # Tirar SS para achar palavra Check-in
     def take_screenshot_img(filename):
@@ -554,15 +923,17 @@ def do_daily_checkin():
             except: pass
         return None
 
-    def find_checkin_text(img):
+    def find_checkin_text(img, min_y):
         """Ao inves de procurar texto branco (que confunde com outros banners),
         procura a faixa horizontal de moedas douradas, e retorna a coordenada
         exata da palavra 'Check-in' que fica imediatamente acima delas.
         """
         if img is None: return None
         gold_y = []
-        for y in range(800, 2100, 10):
-            for x in range(30, 800, 10):
+        # Limita a busca vertical a partir de min_y para ignorar o "Indique e Ganhe"
+        start_y = max(800, min_y)
+        for y in range(start_y, 2100, 10):
+            for x in range(100, 700, 10):
                 r, g, b = img.getpixel((x, y))
                 # Cor das moedas de check-in (dourado/amarelo)
                 if r > 200 and g > 150 and b < 100:
@@ -577,10 +948,10 @@ def do_daily_checkin():
 
     print("[Check-in] Capturando tela para verificar se o check-in ja foi feito...")
     img_before = take_screenshot_img("checkin_before.png")
-    checkin_pos = find_checkin_text(img_before)
+    checkin_pos = find_checkin_text(img_before, seq_y)
 
     if not checkin_pos:
-        print("[Check-in] Nenhuma moeda dourada detectada. Assumindo que o check-in ja foi coletado hoje.")
+        print("[Check-in] Nenhuma moeda dourada detectada após o título da sequência. Assumindo check-in coletado.")
         back()
         time.sleep(2)
         return True
@@ -599,7 +970,7 @@ def do_daily_checkin():
 
     print("[Check-in] Verificando se o check-in foi bem sucedido (moedas devem sumir)...")
     img_after = take_screenshot_img("checkin_after.png")
-    checkin_pos_after = find_checkin_text(img_after)
+    checkin_pos_after = find_checkin_text(img_after, seq_y)
 
     if not checkin_pos_after:
         print("[Check-in] SUCESSO! Moedas douradas nao sao mais visiveis (check-in realizado).")
@@ -895,146 +1266,171 @@ def run_bing_app_automation():
     time.sleep(6)
     clear_blocking_modals()
 
-    try:
-        if do_daily_checkin():
-            stats["checkin_report"] = "✅ Concluido"
-        else:
-            stats["checkin_report"] = "❌ Nao detectado"
-    except Exception as e:
-        print(f"[Erro] Falha no Check-in: {e}")
+    # Tentativa de Check-in (até 3 vezes)
+    checkin_ok = False
+    for att in range(3):
+        print(f"[Check-in] Tentativa {att+1}/3...")
+        try:
+            if do_daily_checkin():
+                checkin_ok = True
+                stats["checkin_report"] = "✅ Concluido"
+                break
+        except Exception as e:
+            print(f"[Erro] Falha no Check-in: {e}")
+        time.sleep(3)
+        
+    if not checkin_ok:
+        stats["checkin_report"] = "❌ Falhou"
 
-    print("[*] Reiniciando o app Bing para leitura limpa antes das noticias...")
-    force_restart_bing()
-    clear_blocking_modals()
-
-    pts_iniciais, max_pts = get_home_points(do_scroll=True)
-    if pts_iniciais is None:
-        pts_iniciais, max_pts = 0, 210
-    print(f"[*] Pontos antes das noticias: {pts_iniciais}/{max_pts}")
-
-    pts_finais, _ = read_news_logic(pts_iniciais, max_pts)
-    
-    pontos_ganhos = pts_finais - pts_iniciais
-    pts_alvo_final = min(max_pts, pts_iniciais + 30)
-
-    if pts_iniciais >= max_pts:
-        stats["news_report"] = "OK Ja concluido antes de comecar"
-    elif pts_finais >= pts_alvo_final:
-        stats["news_report"] = f"OK Concluido (+{pontos_ganhos} pts)"
-    elif pontos_ganhos >= 30:
-        stats["news_report"] = f"OK Concluido (+{pontos_ganhos} pts)"
-    else:
-        stats["news_report"] = (
-            f"INCOMPLETO (+{pontos_ganhos} pts, "
-            f"Atual: {pts_finais}/{max_pts})"
-        )
+    # Tentativa de Leitura de Notícias (até 3 vezes)
+    news_ok = False
+    pts_originais = None
+    for att in range(3):
+        print(f"\n[Notícias] Tentativa {att+1}/3 de leitura de notícias...")
+        try:
+            rewards_bounds = ensure_bing_home_and_rewards_visible(max_retries=3)
+            if not rewards_bounds:
+                print("[Notícias] ABORTADO: Widget Rewards não detectado na Home.")
+                continue
+            
+            pts_iniciais, max_pts = get_home_points(do_scroll=True)
+            if pts_iniciais is None:
+                pts_iniciais, max_pts = 0, 210
+            print(f"[*] Pontos antes das notícias: {pts_iniciais}/{max_pts}")
+            
+            if pts_originais is None:
+                pts_originais = pts_iniciais
+            
+            if pts_iniciais >= max_pts and max_pts > 0:
+                stats["news_report"] = "✅ Já concluído"
+                stats["pts_final"] = pts_iniciais
+                stats["pts_max"] = max_pts
+                news_ok = True
+                break
+                
+            pts_finais, _ = read_news_logic(pts_iniciais, max_pts, news_override=None)
+            total_ganhos = pts_finais - pts_originais
+            print(f"[*] Notícias concluídas na tentativa {att+1}. Total acumulado de pontos ganhos: {total_ganhos}")
+            
+            if total_ganhos >= 30 or (pts_finais >= max_pts and max_pts > 0):
+                stats["news_report"] = f"✅ Concluido (+{total_ganhos} pts)"
+                news_ok = True
+                stats["pts_final"] = pts_finais
+                stats["pts_max"] = max_pts
+                break
+            else:
+                stats["news_report"] = f"❌ Incompleto (+{total_ganhos} pts, {pts_finais}/{max_pts})"
+                stats["pts_final"] = pts_finais
+                stats["pts_max"] = max_pts
+        except Exception as e:
+            print(f"[Erro] Falha nas Notícias: {e}")
+        time.sleep(3)
 
     run_adb("shell am force-stop com.microsoft.bing")
-    stats["pts_final"] = pts_finais
-    stats["pts_max"] = max_pts
     return stats
 
 async def run_full_automation():
     os.system("taskkill /F /IM msedge.exe /T 2>NUL")
-    relatorio = {"hora": datetime.now().strftime("%H:%M"), "diario": "✅ Concluido",
-                 "pc": "❌ Falhou", "mob": "❌ Falhou", "checkin": "❌ Falhou", "news": "❌ Falhou",
-                 "pts_final": 0, "pts_max": 210}
+    
+    relatorio = {
+        "hora": datetime.now().strftime("%H:%M"),
+        "reivindicar": "❌ Não verificado",
+        "diario": "❌ Não verificado",
+        "pesquisas": "❌ Não verificado",
+        "extras": "❌ Não verificado",
+        "checkin": "❌ Não verificado",
+        "news": "❌ Não verificado",
+        "pts_final": 0,
+        "pts_max": 210
+    }
 
     async with async_playwright() as p:
         try:
-            pc_pts_1 = pc_pts_2 = mob_pts_1 = mob_pts_2 = 0
-            # Loop Local PC (Max 5x)
-            for attempt in range(5):
-                print(f"[Web] Tentativa PC {attempt+1}/5")
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
-                    channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"]
-                )
-                pc_pts_tmp, mob_pts_tmp, pc_needed, mob_needed = await do_daily_sets(context, len(context.pages))
-                
-                if attempt == 0:
-                    pc_pts_1, mob_pts_1 = pc_pts_tmp, mob_pts_tmp
-                    
-                if pc_needed > 0:
-                    await perform_searches(context, pc_needed, "PC")
-                    pc_pts_2, mob_pts_2, p_needed_f, _ = await get_remaining_searches(context.pages[0])
-                    await context.close()
-                    if p_needed_f <= 0: break
-                else:
-                    pc_pts_2, mob_pts_2 = pc_pts_tmp, mob_pts_tmp
-                    await context.close()
-                    break
-                    
-            relatorio["pc"] = format_report_line(pc_pts_1, pc_pts_2, 90)
-            await asyncio.sleep(2)
-
-            mob_pts_3 = mob_pts_2
-            mob_needed_2 = max(0, (60 - mob_pts_2) // 3)
-            # Loop Local Edge Mobile (Max 5x)
-            for attempt in range(5):
-                if mob_needed_2 <= 0: break
-                print(f"[Web] Tentativa Edge Mobile {attempt+1}/5")
-                mobile_device = p.devices['Pixel 5']
-                mobile_device.pop("default_browser_type", None)
-                mob_context = await p.chromium.launch_persistent_context(
-                    user_data_dir=os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
-                    channel="msedge", headless=False, **mobile_device
-                )
-                await perform_searches(mob_context, mob_needed_2, "Mobile")
-                await mob_context.close()
-                await asyncio.sleep(2)
-
-                verify_context = await p.chromium.launch_persistent_context(
-                    user_data_dir=os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
-                    channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"]
-                )
-                verify_page = verify_context.pages[0] if verify_context.pages else await verify_context.new_page()
-                _, mob_pts_3, _, mob_needed_2 = await get_remaining_searches(verify_page)
-                await verify_context.close()
-                
-            relatorio["mob"] = format_report_line(mob_pts_2, mob_pts_3, 60)
-
+            print("[Web] Iniciando navegador Edge...")
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
+                channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"]
+            )
+            
+            # Etapa 1: Reivindicar Pontos
+            print("\n=== ETAPA 1: REIVINDICAR PONTOS ===")
+            page = context.pages[0] if context.pages else await context.new_page()
+            
+            claim_status = "Falhou"
+            for att in range(3):
+                try:
+                    await page.goto("https://rewards.bing.com/dashboard", wait_until="domcontentloaded", timeout=15000)
+                    await human_delay(3000, 5000)
+                    try:
+                        await page.screenshot(path="dashboard_screenshot.png")
+                        html = await page.content()
+                        with open("dashboard_dump.html", "w", encoding="utf-8") as f:
+                            f.write(html)
+                        print("[Debug] Screenshot salvo em dashboard_screenshot.png e HTML em dashboard_dump.html")
+                    except Exception as debug_err:
+                        print(f"[Debug] Erro ao salvar artefatos de depuração: {debug_err}")
+                    claim_status, _ = await claim_points_if_available(page)
+                    if "falha" not in claim_status.lower():
+                        break
+                except Exception as e:
+                    print(f"[Erro] Falha ao tentar reivindicar pontos (tentativa {att+1}/3): {e}")
+            relatorio["reivindicar"] = claim_status
+            
+            # Etapa 2: Conjunto Diário
+            diario_status, _ = await run_daily_sets_workflow(context, len(context.pages))
+            relatorio["diario"] = diario_status
+            
+            # Etapa 3: Pesquisas Web (60 pontos)
+            pesquisas_status, _ = await check_and_perform_searches(context)
+            relatorio["pesquisas"] = pesquisas_status
+            
+            # Etapa 4: Continuar Ganhando
+            extras_status, _ = await do_keep_earning(context, len(context.pages))
+            relatorio["extras"] = extras_status
+            
+            # Fecha contexto do navegador
+            await context.close()
+            
         except Exception as e:
-            print(f"Erro Web: {e}")
-
-    app = run_bing_app_automation()
-    relatorio["checkin"], relatorio["news"] = app["checkin_report"], app["news_report"]
-    relatorio["pts_final"] = app.get("pts_final", 0)
-    relatorio["pts_max"] = app.get("pts_max", 210)
-
+            print(f"[Erro] Falha na execução Web: {e}")
+            
+    # Etapa 5: Celular (ADB Mobile)
+    print("\n=== ETAPA 5: CELULAR (ADB MOBILE) ===")
+    try:
+        app = run_bing_app_automation()
+        relatorio["checkin"] = app.get("checkin_report", "❌ Falhou")
+        relatorio["news"] = app.get("news_report", "❌ Falhou")
+        relatorio["pts_final"] = app.get("pts_final", 0)
+        relatorio["pts_max"] = app.get("pts_max", 210)
+    except Exception as e:
+        print(f"[Erro] Falha na execução Mobile: {e}")
+        
     kill_emulator()
-
     return relatorio
 
 async def main():
-    print(f"\n=== INICIANDO EXECUCAO UNICA COM RETENTATIVAS LOCAIS ===")
+    print(f"\n=== INICIANDO EXECUÇÃO UNICA COM RETENTATIVAS LOCAIS ===")
     relatorio = await run_full_automation()
 
-    if relatorio["pts_final"] >= relatorio["pts_max"] and relatorio["pts_max"] > 0:
-        print(f"[*] Sucesso total atingido: {relatorio['pts_final']}/{relatorio['pts_max']}")
-    else:
-        print(f"[!] Pontos incompletos ou falha nas verificacoes: {relatorio['pts_final']}/{relatorio['pts_max']}")
-
     msg = (f"RELATORIO BING AUTO - {relatorio['hora']}\n\n"
+           f"Reivindicar: {relatorio['reivindicar']}\n"
            f"Daily Set: {relatorio['diario']}\n"
-           f"Buscas PC: {relatorio['pc']}\n"
-           f"Buscas Mob: {relatorio['mob']}\n"
-           f"Check-in: {relatorio['checkin']}\n"
-           f"Noticias: {relatorio['news']}\n"
-           f"Pontuacao Final: {relatorio['pts_final']}/{relatorio['pts_max']}\n\n"
-           f"Status: {'Concluido' if relatorio['pts_final'] >= relatorio['pts_max'] else 'Incompleto'}")
+           f"Pesquisas (60 pts): {relatorio['pesquisas']}\n"
+           f"Pontos Extras: {relatorio['extras']}\n"
+           f"Check-in Celular: {relatorio['checkin']}\n"
+           f"Noticias Celular: {relatorio['news']}\n"
+           f"Pontuacao Final Celular: {relatorio['pts_final']}/{relatorio['pts_max']}\n")
 
-    # Mensagem Telegram com emojis (separada do print no terminal Windows)
+    # Message telegram with emojis
     msg_telegram = (f"\U0001f680 *RELATORIO BING AUTO - {relatorio['hora']}*\n\n"
-                    f"\U0001f4c5 *Daily Set:* {relatorio['diario']}\n"
-                    f"\U0001f4bb *Buscas PC:* {relatorio['pc']}\n"
-                    f"\U0001f4f1 *Buscas Mob:* {relatorio['mob']}\n"
-                    f"\U0001fa99 *Check-in:* {relatorio['checkin']}\n"
-                    f"\U0001f4f0 *Noticias:* {relatorio['news']}\n"
-                    f"\U0001f3c6 *Pontuacao Final:* {relatorio['pts_final']}/{relatorio['pts_max']}\n\n"
-                    f"\U0001f3af _Status: {'Concluido' if relatorio['pts_final'] >= relatorio['pts_max'] else 'Incompleto'}_")
+                    f"\U0001f4c5 *Reivindicar:* {relatorio['reivindicar']}\n"
+                    f"\U0001f4bb *Daily Set:* {relatorio['diario']}\n"
+                    f"\U0001f4c4 *Pesquisas (60 pts):* {relatorio['pesquisas']}\n"
+                    f"\U0001fa99 *Pontos Extras:* {relatorio['extras']}\n"
+                    f"\U0001f4f1 *Check-in Celular:* {relatorio['checkin']}\n"
+                    f"\U0001f4f0 *Noticias Celular:* {relatorio['news']}\n\n"
+                    f"\U0001f3c6 *Pontuacao Final Celular:* {relatorio['pts_final']}/{relatorio['pts_max']}")
 
-    # Print seguro para terminais Windows (com fallback caso haja emojis/caracteres nao suportados)
     try:
         print(msg)
     except UnicodeEncodeError:
