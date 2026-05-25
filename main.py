@@ -42,6 +42,54 @@ def get_random_search_term():
 async def human_delay(min_ms=2000, max_ms=5000):
     await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000.0)
 
+async def get_edge_minutes(page):
+    try:
+        progressbar = page.locator("div[role='progressbar'][aria-label='Edge']").first
+        if await progressbar.count() > 0:
+            valuenow = await progressbar.get_attribute("aria-valuenow")
+            valuemax = await progressbar.get_attribute("aria-valuemax")
+            if valuenow is not None and valuemax is not None:
+                return int(valuenow), int(valuemax)
+        
+        text_elements = page.locator("span, p, div").filter(has_text="Minutos:")
+        for idx in range(await text_elements.count()):
+            text = await text_elements.nth(idx).text_content()
+            if text:
+                match = re.search(r'Minutos:\s*(\d+)/(\d+)', text)
+                if match:
+                    return int(match.group(1)), int(match.group(2))
+    except Exception as e:
+        print(f"[Erro] Falha ao ler minutos do Edge: {e}")
+    return None, None
+
+async def perform_slow_search(page, term):
+    try:
+        import urllib.parse
+        search_url = f"https://www.bing.com/search?q={urllib.parse.quote(term)}&form=CHROMN"
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+        await human_delay(2000, 4000)
+        
+        total_duration = random.randint(60, 120)
+        print(f"[PC Lento] Simulando leitura por {total_duration}s...")
+        
+        start_time = time.time()
+        while time.time() - start_time < total_duration:
+            action = random.choice(["scroll_down", "scroll_up", "idle"])
+            if action == "scroll_down":
+                scroll_amount = random.randint(200, 600)
+                await page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+            elif action == "scroll_up":
+                scroll_amount = random.randint(100, 400)
+                await page.evaluate(f"window.scrollBy(0, {-scroll_amount})")
+            
+            wait_time = random.uniform(8, 15)
+            elapsed = time.time() - start_time
+            if elapsed + wait_time > total_duration:
+                wait_time = max(0.5, total_duration - elapsed)
+            await asyncio.sleep(wait_time)
+    except Exception as e:
+        print(f"Erro na pesquisa lenta: {e}")
+
 async def handle_new_pages(context, default_pages_count):
     # Aguarda até 8 segundos para ver se uma nova página/aba se abre
     for _ in range(8):
@@ -308,31 +356,53 @@ async def run_daily_sets_workflow(context, default_pages_count):
         
     return "Falhou/Incompleto", 0
 
-async def perform_searches(context, count, device_name="PC"):
+async def perform_searches(context, count, device_name="PC", slow=False):
     if count <= 0: return
     page = context.pages[0] if context.pages else await context.new_page()
     for i in range(count):
         term_raw = get_random_search_term()
         term = term_raw.encode('ascii', 'ignore').decode('ascii')
-        print(f"[{device_name}] Pesquisa {i+1}/{count}: '{term}'")
-        try:
-            import urllib.parse
-            search_url = f"https://www.bing.com/search?q={urllib.parse.quote(term)}&form=CHROMN"
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-            await human_delay(1500, 3000)
+        print(f"[{device_name}] Pesquisa {i+1}/{count}: '{term}' (Modo {'Lento' if slow else 'Rápido'})")
+        if slow:
+            await perform_slow_search(page, term)
+        else:
             try:
-                await page.evaluate(f"window.scrollBy(0, {random.randint(300, 700)})")
-                await human_delay(1000, 2000)
-                await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
-            except: pass
-            await human_delay(7000, 10000)
-        except Exception as e: 
-            print(f"Erro pesquisa: {e}")
+                import urllib.parse
+                search_url = f"https://www.bing.com/search?q={urllib.parse.quote(term)}&form=CHROMN"
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+                await human_delay(1500, 3000)
+                try:
+                    await page.evaluate(f"window.scrollBy(0, {random.randint(300, 700)})")
+                    await human_delay(1000, 2000)
+                    await page.evaluate(f"window.scrollBy(0, {random.randint(100, 400)})")
+                except: pass
+                await human_delay(7000, 10000)
+            except Exception as e: 
+                print(f"Erro pesquisa: {e}")
 
 async def check_and_perform_searches(context):
     print("\n--- INICIANDO ETAPA 3: PESQUISAS (WEB 60 PONTOS) ---")
     page = context.pages[0] if context.pages else await context.new_page()
     url = "https://rewards.bing.com/earn"
+    
+    # Decidir o modo de pesquisa (lento ou rápido) baseado no tempo do Edge
+    slow_mode = True
+    try:
+        print("[Pesquisas] Verificando tempo de navegação no Edge...")
+        await page.goto("https://rewards.bing.com/dashboard", wait_until="domcontentloaded", timeout=15000)
+        await human_delay(2000, 4000)
+        minutos, total = await get_edge_minutes(page)
+        if minutos is not None and total is not None:
+            print(f"[Pesquisas] Tempo no Edge: {minutos}/{total} minutos.")
+            if minutos >= total:
+                print("[Pesquisas] Tempo no Edge já concluído! Pesquisas rápidas ativadas.")
+                slow_mode = False
+            else:
+                print(f"[Pesquisas] Tempo no Edge incompleto ({minutos}/{total}). Pesquisas lentas ativadas para acumular tempo.")
+        else:
+            print("[Pesquisas] Não foi possível ler o tempo do Edge. Usando modo lento por precaução.")
+    except Exception as e:
+        print(f"[Pesquisas] Erro ao ler tempo do Edge antes das pesquisas: {e}. Usando modo lento por precaução.")
     
     current_pts = 0
     max_pts = 60
@@ -360,7 +430,7 @@ async def check_and_perform_searches(context):
         
         if not clicked_today_points:
             print("[Pesquisas] Não foi possível clicar no card 'Detalhamento de pontos'. Fazendo 20 pesquisas cegas...")
-            await perform_searches(context, 20, "PC")
+            await perform_searches(context, 20, "PC", slow=slow_mode)
             return "Concluído (Buscas feitas às cegas)", 60
             
         print("[Pesquisas] Lendo pontos da barra lateral...")
@@ -407,7 +477,7 @@ async def check_and_perform_searches(context):
             searches_needed = 20
             
         print(f"[Pesquisas] Faltam {max_pts - current_pts} pontos. Iniciando {searches_needed} pesquisas...")
-        await perform_searches(context, searches_needed, "PC")
+        await perform_searches(context, searches_needed, "PC", slow=slow_mode)
         await human_delay(3000, 5000)
         
     try:
@@ -430,6 +500,7 @@ async def check_and_perform_searches(context):
                         return f"Incompleto ({current_pts}/60)", current_pts
     except: pass
         
+    return f"Incompleto ({current_pts}/{max_pts})", current_pts  
     return f"Incompleto ({current_pts}/{max_pts})", current_pts
 
 async def get_keep_earning_progress(page):
@@ -553,6 +624,102 @@ async def do_keep_earning(context, default_pages_count):
     except: pass
     
     return "Falhou/Incompleto", 0
+
+async def get_checkin_status(page):
+    """Lê o card de Check-in no painel do Rewards e retorna se já foi feito hoje.
+    Estratégia igual à leitura dos minutos do Edge: progressbar com aria-label.
+    Retorna (True, 'X/Y') se já feito, (False, 'X/Y') se pendente, (None, None) se falhar.
+    """
+    try:
+        # Tentativa 1: progressbar com aria-label contendo 'check-in' ou 'check in'
+        progressbar = page.locator("div[role='progressbar']").filter(
+            has=page.locator("[aria-label*='Check-in'], [aria-label*='check-in'], [aria-label*='Check in']")
+        ).first
+
+        # Fallback mais direto: qualquer progressbar cujo aria-label contenha 'check'
+        if await progressbar.count() == 0:
+            all_bars = page.locator("div[role='progressbar']")
+            for idx in range(await all_bars.count()):
+                label = await all_bars.nth(idx).get_attribute("aria-label")
+                if label and 'check' in label.lower():
+                    progressbar = all_bars.nth(idx)
+                    break
+
+        if await progressbar.count() > 0:
+            valuenow = await progressbar.get_attribute("aria-valuenow")
+            valuemax = await progressbar.get_attribute("aria-valuemax")
+            if valuenow is not None and valuemax is not None:
+                progresso = f"{valuenow}/{valuemax}"
+                feito = int(valuenow) >= int(valuemax) and int(valuemax) > 0
+                print(f"[Check-in PC] Card lido via progressbar: {progresso}")
+                return feito, progresso
+
+        # Tentativa 2: busca textual no body por padrão 'check.in X/Y'
+        body_text = await page.inner_text("body", timeout=5000)
+        match = re.search(r'check[\s\-]in.*?(\d+)\s*/\s*(\d+)', body_text, re.IGNORECASE)
+        if match:
+            now_val, max_val = int(match.group(1)), int(match.group(2))
+            progresso = f"{now_val}/{max_val}"
+            feito = now_val >= max_val and max_val > 0
+            print(f"[Check-in PC] Card lido via texto: {progresso}")
+            return feito, progresso
+
+    except Exception as e:
+        print(f"[Check-in PC] Erro ao ler status do check-in: {e}")
+    return None, None
+
+
+async def ensure_edge_time_completed(context):
+    print("\n--- INICIANDO ETAPA 5: CONFERÊNCIA DE TEMPO NO EDGE (30 MINUTOS) ---")
+    page = context.pages[0] if context.pages else await context.new_page()
+    url = "https://rewards.bing.com/dashboard"
+    
+    max_wait_iterations = 8  # no máximo ~40 minutos (8 ciclos de ~5 minutos)
+    for iteration in range(max_wait_iterations):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await human_delay(3000, 5000)
+        except Exception as e:
+            print(f"[Edge Tempo] Erro ao navegar para o dashboard: {e}")
+            await asyncio.sleep(10)
+            continue
+            
+        minutos, total = await get_edge_minutes(page)
+        if minutos is None or total is None:
+            print("[Edge Tempo] Não foi possível ler o card de tempo do Edge. Tentando novamente na próxima iteração...")
+            minutos = 0
+            total = 30
+            
+        print(f"[Edge Tempo] Status atual: {minutos}/{total} minutos.")
+        if minutos >= total:
+            print(f"[SUCESSO] Tempo de navegação no Edge concluído ({minutos}/{total})!")
+            return f"Concluído ({minutos}/{total})", minutos
+            
+        minutos_faltantes = total - minutos
+        print(f"[Edge Tempo] Faltam {minutos_faltantes} minutos. Realizando pesquisas adicionais por 5 minutos para atualizar o painel...")
+        
+        # Realiza 4 pesquisas lentas (cada pesquisa lenta dura 60s a 120s, totalizando ~5 min)
+        for i in range(4):
+            term_raw = get_random_search_term()
+            term = term_raw.encode('ascii', 'ignore').decode('ascii')
+            print(f"[Edge Tempo] Pesquisa adicional {i+1}/4: '{term}'")
+            await perform_slow_search(page, term)
+            
+        print("[Edge Tempo] Aguardando 10 segundos antes de recarregar o dashboard...")
+        await asyncio.sleep(10)
+        
+    print("[Edge Tempo] Limite de tempo de espera atingido. Prosseguindo...")
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await human_delay(3000, 5000)
+        minutos, total = await get_edge_minutes(page)
+        if minutos is not None and total is not None:
+            if minutos >= total:
+                return f"Concluído ({minutos}/{total})", minutos
+            else:
+                return f"Incompleto ({minutos}/{total})", minutos
+    except: pass
+    return "Incompleto (Atingiu limite)", 0
 
 # ==========================================
 # FUNÇÕES ANDROID (ADB - DISPOSITIVO FÍSICO)
@@ -1301,49 +1468,41 @@ def format_report_line(pts_start, pts_end, max_pts):
         else:
             return f"❌ Falhou (0 pts ganhos, marcando {pts_end}/{max_pts})"
 
-def run_bing_app_automation():
-    stats = {"checkin_report": "❌ Falhou", "news_report": "❌ Falhou"}
+MAX_CHECKIN_ATTEMPTS = 3  # Número máximo de tentativas de check-in no celular
 
+
+def run_bing_app_setup():
+    """Inicializa o dispositivo e abre o Bing. Retorna True se pronto."""
     if not ensure_emulator_running():
-        return stats
+        return False
 
     if not launch_bing():
         print("[ERRO] Não foi possível abrir o Bing.")
-        return stats
+        return False
 
     print("[*] Aguardando estabilidade do Bing (10s)...")
     time.sleep(10)
     clear_blocking_modals()
     time.sleep(2)
-    
+
     # Verifica se estamos na Home do Bing (e nao na pesquisa ou outra tela)
     xml = get_ui_dump(retries=2)
     if xml:
-        # Se detectar a barra de pesquisa ativa/focada, pressiona Back para voltar à Home
         if 'SearchTextInput' in xml or ('search' in xml.lower() and 'focusable="true" focused="true"' in xml):
             print("[AVISO] Tela de pesquisa detectada em vez da Home. Pressionando Back...")
             back()
             time.sleep(3)
 
-    # Tentativa de Check-in (até 3 vezes)
-    checkin_ok = False
-    for att in range(3):
-        print(f"[Check-in] Tentativa {att+1}/3...")
-        try:
-            if do_daily_checkin():
-                checkin_ok = True
-                stats["checkin_report"] = "✅ Concluido"
-                break
-        except Exception as e:
-            print(f"[Erro] Falha no Check-in: {e}")
-        time.sleep(3)
-        
-    if not checkin_ok:
-        stats["checkin_report"] = "❌ Falhou"
+    return True
 
-    # Tentativa de Leitura de Notícias (até 3 vezes)
+
+def run_bing_news_phase(stats):
+    """Executa apenas a fase de leitura de notícias no celular.
+    Lê os pontos do card ANTES de começar: se já no máximo, avisa e encerra sem ler.
+    """
     news_ok = False
     pts_originais = None
+
     for att in range(3):
         print(f"\n[Notícias] Tentativa {att+1}/3 de leitura de notícias...")
         try:
@@ -1351,28 +1510,37 @@ def run_bing_app_automation():
             if not rewards_bounds:
                 print("[Notícias] ABORTADO: Widget Rewards não detectado na Home.")
                 continue
-            
+
+            # --- Lê pontos do card ANTES de começar ---
             pts_iniciais, max_pts = get_home_points(do_scroll=True)
             if pts_iniciais is None:
                 pts_iniciais, max_pts = 0, 210
             print(f"[*] Pontos antes das notícias: {pts_iniciais}/{max_pts}")
-            
+
             if pts_originais is None:
                 pts_originais = pts_iniciais
-            
+
+            # Card já no máximo: não precisa ler nada
             if pts_iniciais >= max_pts and max_pts > 0:
-                stats["news_report"] = "✅ Já concluído"
+                print(f"[SUCESSO] Card de notícias já está no máximo ({pts_iniciais}/{max_pts}). Nada a fazer!")
+                stats["news_report"] = f"✅ Já concluído ({pts_iniciais}/{max_pts})"
                 stats["pts_final"] = pts_iniciais
                 stats["pts_max"] = max_pts
                 news_ok = True
                 break
-                
+
             pts_finais, _ = read_news_logic(pts_iniciais, max_pts, news_override=None)
             total_ganhos = pts_finais - pts_originais
             print(f"[*] Notícias concluídas na tentativa {att+1}. Total acumulado de pontos ganhos: {total_ganhos}")
-            
-            if total_ganhos >= 30 or (pts_finais >= max_pts and max_pts > 0):
-                stats["news_report"] = f"✅ Concluido (+{total_ganhos} pts)"
+
+            if pts_finais >= max_pts and max_pts > 0:
+                stats["news_report"] = f"✅ Concluido — card completo! (+{total_ganhos} pts, {pts_finais}/{max_pts})"
+                news_ok = True
+                stats["pts_final"] = pts_finais
+                stats["pts_max"] = max_pts
+                break
+            elif total_ganhos >= 30:
+                stats["news_report"] = f"✅ Concluido (+{total_ganhos} pts, {pts_finais}/{max_pts})"
                 news_ok = True
                 stats["pts_final"] = pts_finais
                 stats["pts_max"] = max_pts
@@ -1385,8 +1553,77 @@ def run_bing_app_automation():
             print(f"[Erro] Falha nas Notícias: {e}")
         time.sleep(3)
 
-    run_adb("shell am force-stop com.microsoft.bing")
     return stats
+
+async def do_checkin_with_browser_validation(page):
+    """Orquestra o check-in alternando celular (gesto ADB) e PC (validação via browser).
+    
+    Fluxo por tentativa:
+      1. [Celular] Executa o gesto de check-in via do_daily_checkin()
+      2. [PC] Aguarda uma pausa natural (simula pessoa voltando ao computador)
+      3. [PC] Recarrega o dashboard no Edge já aberto e lê o card check-in
+      4. Se confirmado (X/1 = 1/1) → sucesso
+      5. Se não confirmado → reinicia Bing no celular e tenta novamente
+    
+    Manter o Edge aberto e apenas recarregar é o comportamento mais humano possível.
+    """
+    print(f"\n--- CHECK-IN COM VALIDAÇÃO NO NAVEGADOR (até {MAX_CHECKIN_ATTEMPTS} tentativas) ---")
+
+    for attempt in range(MAX_CHECKIN_ATTEMPTS):
+        print(f"\n[Check-in] === Tentativa {attempt+1}/{MAX_CHECKIN_ATTEMPTS} ===")
+
+        if attempt > 0:
+            # Reinicia o Bing no celular antes de tentar novamente
+            print("[Check-in] Reiniciando app Bing no celular para nova tentativa...")
+            force_restart_bing()
+            time.sleep(5)
+            clear_blocking_modals()
+            time.sleep(2)
+
+        # [CELULAR] Faz o gesto de check-in
+        try:
+            gesto_ok = do_daily_checkin()
+        except Exception as e:
+            print(f"[Check-in] Erro no gesto do celular: {e}")
+            gesto_ok = False
+
+        if not gesto_ok:
+            print(f"[Check-in] Gesto do celular falhou na tentativa {attempt+1}.")
+            continue
+
+        # [PC] Pausa natural antes de voltar ao computador (simula pessoa olhando o celular)
+        pausa = random.uniform(8, 15)
+        print(f"[Check-in] Aguardando {pausa:.0f}s antes de validar no navegador...")
+        await asyncio.sleep(pausa)
+
+        # [PC] Recarrega o dashboard no Edge já aberto (F5 natural)
+        print("[Check-in] Recarregando dashboard do Rewards no Edge para validar...")
+        try:
+            await page.goto(
+                "https://rewards.bing.com/dashboard",
+                wait_until="domcontentloaded",
+                timeout=15000
+            )
+            await human_delay(3000, 6000)
+        except Exception as e:
+            print(f"[Check-in] Erro ao recarregar dashboard: {e}")
+            continue
+
+        # [PC] Lê o card de check-in
+        feito, progresso = await get_checkin_status(page)
+        print(f"[Check-in] Status no painel do Rewards: {progresso}")
+
+        if feito:
+            print(f"[Check-in] ✅ CONFIRMADO pelo navegador! ({progresso})")
+            return True, f"✅ Concluído ({progresso})"
+        elif feito is None:
+            print("[Check-in] Não foi possível ler o card. Assumindo falha e tentando novamente...")
+        else:
+            print(f"[Check-in] ❌ Ainda pendente ({progresso}). Tentará novamente...")
+
+    print(f"[Check-in] Esgotadas as {MAX_CHECKIN_ATTEMPTS} tentativas sem confirmação.")
+    return False, "❌ Falhou (não confirmado pelo navegador)"
+
 
 async def run_full_automation():
     os.system("taskkill /F /IM msedge.exe /T 2>NUL")
@@ -1397,6 +1634,7 @@ async def run_full_automation():
         "diario": "❌ Não verificado",
         "pesquisas": "❌ Não verificado",
         "extras": "❌ Não verificado",
+        "tempo_edge": "❌ Não verificado",
         "checkin": "❌ Não verificado",
         "news": "❌ Não verificado",
         "pts_final": 0,
@@ -1404,17 +1642,17 @@ async def run_full_automation():
     }
 
     async with async_playwright() as p:
+        page = None
         try:
             print("[Web] Iniciando navegador Edge...")
             context = await p.chromium.launch_persistent_context(
                 user_data_dir=os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
                 channel="msedge", headless=False, no_viewport=True, args=["--start-maximized"]
             )
-            
+            page = context.pages[0] if context.pages else await context.new_page()
+
             # Etapa 1: Reivindicar Pontos
             print("\n=== ETAPA 1: REIVINDICAR PONTOS ===")
-            page = context.pages[0] if context.pages else await context.new_page()
-            
             claim_status = "Falhou"
             for att in range(3):
                 try:
@@ -1434,36 +1672,75 @@ async def run_full_automation():
                 except Exception as e:
                     print(f"[Erro] Falha ao tentar reivindicar pontos (tentativa {att+1}/3): {e}")
             relatorio["reivindicar"] = claim_status
-            
+
             # Etapa 2: Conjunto Diário
             diario_status, _ = await run_daily_sets_workflow(context, len(context.pages))
             relatorio["diario"] = diario_status
-            
+
             # Etapa 3: Pesquisas Web (60 pontos)
             pesquisas_status, _ = await check_and_perform_searches(context)
             relatorio["pesquisas"] = pesquisas_status
-            
+
             # Etapa 4: Continuar Ganhando
             extras_status, _ = await do_keep_earning(context, len(context.pages))
             relatorio["extras"] = extras_status
-            
-            # Fecha contexto do navegador
+
+            # Etapa 5: Tempo de Navegação no Edge (30 minutos)
+            tempo_edge_status, _ = await ensure_edge_time_completed(context)
+            relatorio["tempo_edge"] = tempo_edge_status
+
+            # Etapa 5.5: Lê status do check-in ANTES de fechar o Edge
+            # O Edge permanece aberto — a validação durante o check-in do celular
+            # fará um reload nesta mesma aba, simulando comportamento humano natural.
+            print("\n=== ETAPA 5.5: VERIFICANDO STATUS DO CHECK-IN NO PAINEL ===")
+            await page.goto("https://rewards.bing.com/dashboard", wait_until="domcontentloaded", timeout=15000)
+            await human_delay(2000, 4000)
+            checkin_ja_feito, checkin_progresso = await get_checkin_status(page)
+            if checkin_ja_feito is True:
+                print(f"[Check-in PC] Check-in JÁ REALIZADO hoje ({checkin_progresso}). Celular irá apenas ler notícias.")
+            elif checkin_ja_feito is False:
+                print(f"[Check-in PC] Check-in PENDENTE ({checkin_progresso}). Celular executará o check-in.")
+            else:
+                print("[Check-in PC] Não foi possível ler o status. Celular tentará o check-in por precaução.")
+                checkin_ja_feito = False  # por segurança, tenta no celular
+
+            # Etapa 6: Celular — setup (inicializa dispositivo e abre Bing)
+            print("\n=== ETAPA 6: CELULAR (ADB MOBILE) ===")
+            stats = {"checkin_report": "❌ Falhou", "news_report": "❌ Falhou", "pts_final": 0, "pts_max": 210}
+
+            mobile_ok = run_bing_app_setup()
+            if not mobile_ok:
+                print("[Celular] ERRO: Não foi possível inicializar o dispositivo/app.")
+                relatorio["checkin"] = "❌ Dispositivo não respondeu"
+                relatorio["news"] = "❌ Dispositivo não respondeu"
+            else:
+                # Check-in: pula se já feito, ou executa com validação no navegador
+                if checkin_ja_feito:
+                    print("[Check-in] Pulando check-in — já confirmado no painel do Rewards.")
+                    stats["checkin_report"] = f"✅ Já feito ({checkin_progresso})"
+                else:
+                    checkin_confirmado, checkin_msg = await do_checkin_with_browser_validation(page)
+                    stats["checkin_report"] = checkin_msg
+
+                # Notícias: verifica pontos do card antes de começar
+                stats = run_bing_news_phase(stats)
+                relatorio["checkin"] = stats.get("checkin_report", "❌ Falhou")
+                relatorio["news"] = stats.get("news_report", "❌ Falhou")
+                relatorio["pts_final"] = stats.get("pts_final", 0)
+                relatorio["pts_max"] = stats.get("pts_max", 210)
+
+            # Fecha o Edge APÓS toda a fase mobile (o reload durante validação usa esta aba)
+            print("\n[Web] Encerrando o Edge após fase mobile...")
             await context.close()
-            
+
         except Exception as e:
-            print(f"[Erro] Falha na execução Web: {e}")
-            
-    # Etapa 5: Celular (ADB Mobile)
-    print("\n=== ETAPA 5: CELULAR (ADB MOBILE) ===")
-    try:
-        app = run_bing_app_automation()
-        relatorio["checkin"] = app.get("checkin_report", "❌ Falhou")
-        relatorio["news"] = app.get("news_report", "❌ Falhou")
-        relatorio["pts_final"] = app.get("pts_final", 0)
-        relatorio["pts_max"] = app.get("pts_max", 210)
-    except Exception as e:
-        print(f"[Erro] Falha na execução Mobile: {e}")
-        
+            print(f"[Erro] Falha na execução: {e}")
+            try:
+                if page and not page.is_closed():
+                    await page.context.close()
+            except: pass
+
+    run_adb("shell am force-stop com.microsoft.bing")
     kill_emulator()
     return relatorio
 
@@ -1476,6 +1753,7 @@ async def main():
            f"Daily Set: {relatorio['diario']}\n"
            f"Pesquisas (60 pts): {relatorio['pesquisas']}\n"
            f"Pontos Extras: {relatorio['extras']}\n"
+           f"Tempo Edge: {relatorio['tempo_edge']}\n"
            f"Check-in Celular: {relatorio['checkin']}\n"
            f"Noticias Celular: {relatorio['news']}\n"
            f"Pontuacao Final Celular: {relatorio['pts_final']}/{relatorio['pts_max']}\n")
@@ -1486,6 +1764,7 @@ async def main():
                     f"\U0001f4bb *Daily Set:* {relatorio['diario']}\n"
                     f"\U0001f4c4 *Pesquisas (60 pts):* {relatorio['pesquisas']}\n"
                     f"\U0001fa99 *Pontos Extras:* {relatorio['extras']}\n"
+                    f"\u23f1 *Tempo Edge (30m):* {relatorio['tempo_edge']}\n"
                     f"\U0001f4f1 *Check-in Celular:* {relatorio['checkin']}\n"
                     f"\U0001f4f0 *Noticias Celular:* {relatorio['news']}\n\n"
                     f"\U0001f3c6 *Pontuacao Final Celular:* {relatorio['pts_final']}/{relatorio['pts_max']}")

@@ -13,8 +13,14 @@ __pycache__/
 bing_log.txt
 *.log
 
+
 # Arquivo XML temporário do ADB
 view.xml
+*.xml
+
+# Arquivos de depuração e imagens
+*.html
+*.png
 
 # IDE / Editor
 .vscode/
