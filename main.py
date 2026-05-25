@@ -672,6 +672,7 @@ def ensure_emulator_running():
 def launch_bing():
     """Inicia o app Bing no dispositivo físico.
     Tenta ate 3 vezes com reconexao ADB entre tentativas.
+    Usa force-stop antes para garantir que o app abra limpo na Home.
     """
     for tentativa in range(3):
         if tentativa > 0:
@@ -679,14 +680,24 @@ def launch_bing():
             run_adb(f"connect {DEVICE_ID}")
             time.sleep(5)
 
+        # Fecha o Bing se estiver aberto para garantir estado limpo
+        print("[Debug] Fechando Bing (force-stop) para abrir limpo...")
+        run_adb("shell am force-stop com.microsoft.bing", timeout_sec=10)
+        time.sleep(2)
+
         print("[Debug] Solicitando abertura do Bing...")
-        run_adb("shell am start -n com.microsoft.bing/com.microsoft.sapphire.app.main.SapphireMainActivity", timeout_sec=30)
+        # Usa a intent MAIN/LAUNCHER ao inves de Activity direta
+        # Isso garante que o app abre na Home e nao numa sub-Activity de pesquisa
+        run_adb("shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.microsoft.bing/com.microsoft.sapphire.app.main.SapphireMainActivity", timeout_sec=30)
         print("[Debug] Aguardando interface estabilizar...")
         for i in range(12):
             time.sleep(2)
             if is_bing_open():
                 print(f"[Debug] Janela do Bing detectada ({i+1}/12).")
-                time.sleep(5)
+                # Aguarda tempo suficiente para o app carregar a Home completamente
+                # (10s evita que interacoes prematuras cliquem na barra de pesquisa)
+                print("[Debug] Aguardando 10s para Home carregar completamente...")
+                time.sleep(10)
                 return True
 
         print(f"[Debug] Bing nao detectado na tentativa {tentativa+1}/3.")
@@ -767,33 +778,73 @@ def contar_moedas_nao_coletadas(xml, min_y=500):
 def return_to_home_top():
     """Toca no icone 'Home/Início' na barra inferior para voltar ao topo instantaneamente.
     Se falhar, faz scroll up 3 vezes para subir o feed com segurança.
+    CUIDADO: Evita clicar em campos de pesquisa (EditText) ou elementos não-navegação.
     """
     print("[*] Retornando ao topo via ícone Home...")
+    
+    # Classes de UI que NÃO são botões de navegação (campo de pesquisa, etc.)
+    _SKIP_CLASSES = ['edittext', 'autocompletextview', 'searchview', 'textview']
     
     # Tentativa 1: Localizar dinamicamente no XML
     xml = get_ui_dump(retries=2)
     if xml:
         try:
             root = ET.fromstring(xml)
+            best_candidate = None
+            best_priority = -1
+            
             for node in root.iter('node'):
                 desc = (node.get('content-desc') or '').lower()
                 res = (node.get('resource-id') or '').lower()
                 text = (node.get('text') or '').lower()
+                cls = (node.get('class') or '').lower()
                 
-                # Critérios de busca para o botão Home
-                is_home = any(hid in res for hid in ['navigation_home', 'home_nav', 'tab_home', 'bottom_nav_home']) or \
-                          any(htxt in desc for htxt in ['home', 'início', 'inicio']) or \
-                          any(htxt in text for htxt in ['home', 'início', 'inicio'])
+                # PULAR campos de texto/pesquisa — clicar neles abre a pesquisa do Bing!
+                if any(skip in cls for skip in _SKIP_CLASSES):
+                    if 'home' in desc or 'home' in text or 'início' in desc:
+                        print(f"[Debug] Ignorando elemento tipo '{cls}' com texto home (seria campo de pesquisa)")
+                    continue
                 
-                if is_home:
-                    b = parse_bounds(node.get('bounds', ''))
-                    # Na barra inferior do S20 FE, o Y inicial costuma ser > 1800
-                    if b[1] > 1800:
-                        print(f"[OK] Ícone Home detectado em {b}. Clicando...")
-                        tap((b[0]+b[2])//2, (b[1]+b[3])//2)
-                        time.sleep(1.2)
-                        return True
-        except: pass
+                # PULAR elementos que contenham termos de pesquisa no resource-id
+                if any(sid in res for sid in ['search', 'pesquis', 'query', 'omnibox', 'url_bar']):
+                    print(f"[Debug] Ignorando elemento de pesquisa: {res}")
+                    continue
+                
+                b = parse_bounds(node.get('bounds', ''))
+                # Na barra inferior do S20 FE, o Y inicial costuma ser > 1800
+                if b[1] <= 1800:
+                    continue
+                
+                # Prioridade 1 (alta): resource-id específico de navegação
+                if any(hid in res for hid in ['navigation_home', 'home_nav', 'tab_home', 'bottom_nav_home', 'bottom_bar']):
+                    if best_priority < 3:
+                        best_candidate = b
+                        best_priority = 3
+                        continue
+                
+                # Prioridade 2 (média): content-desc contém 'home/início' E é um ImageView/Button
+                if any(htxt in desc for htxt in ['home', 'início', 'inicio']):
+                    if any(ok_cls in cls for ok_cls in ['imageview', 'imagebutton', 'button', 'framelayout', 'linearlayout', 'bottomnavigation']):
+                        if best_priority < 2:
+                            best_candidate = b
+                            best_priority = 2
+                            continue
+                
+                # Prioridade 3 (baixa): text contém 'home/início' com classe aceitável
+                if any(htxt in text for htxt in ['home', 'início', 'inicio']):
+                    if any(ok_cls in cls for ok_cls in ['imageview', 'imagebutton', 'button', 'tab']):
+                        if best_priority < 1:
+                            best_candidate = b
+                            best_priority = 1
+            
+            if best_candidate:
+                b = best_candidate
+                print(f"[OK] Ícone Home detectado em {b} (prioridade {best_priority}). Clicando...")
+                tap((b[0]+b[2])//2, (b[1]+b[3])//2)
+                time.sleep(1.5)
+                return True
+        except Exception as e:
+            print(f"[Debug] Erro ao buscar ícone Home no XML: {e}")
     
     # Tentativa 2: Fallback com scrolls para cima se o XML/Clique falhar
     print("[AVISO] Ícone Home não encontrado ou clique falhou. Executando scrolls para subir ao topo...")
@@ -1027,10 +1078,8 @@ def get_home_points(do_scroll=True):
 
 def force_restart_bing():
     print("[*] Reiniciando Bing para destravar interface...")
-    run_adb("shell am force-stop com.microsoft.bing")
-    time.sleep(2)
+    # launch_bing() ja faz force-stop internamente antes de reabrir
     launch_bing()
-    time.sleep(5)
 
 # Termos que identificam o label de anuncio no XML do Bing (Android)
 _AD_LABELS = {'anúncio', 'anuncio', 'ad', 'advertisement', 'patrocinado', 'sponsored', 'publicidade'}
@@ -1262,9 +1311,19 @@ def run_bing_app_automation():
         print("[ERRO] Não foi possível abrir o Bing.")
         return stats
 
-    print("[*] Aguardando estabilidade do Bing...")
-    time.sleep(6)
+    print("[*] Aguardando estabilidade do Bing (10s)...")
+    time.sleep(10)
     clear_blocking_modals()
+    time.sleep(2)
+    
+    # Verifica se estamos na Home do Bing (e nao na pesquisa ou outra tela)
+    xml = get_ui_dump(retries=2)
+    if xml:
+        # Se detectar a barra de pesquisa ativa/focada, pressiona Back para voltar à Home
+        if 'SearchTextInput' in xml or ('search' in xml.lower() and 'focusable="true" focused="true"' in xml):
+            print("[AVISO] Tela de pesquisa detectada em vez da Home. Pressionando Back...")
+            back()
+            time.sleep(3)
 
     # Tentativa de Check-in (até 3 vezes)
     checkin_ok = False
